@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import shutil
+import tempfile
 from pathlib import Path
 
 import streamlit as st
@@ -12,11 +14,11 @@ BASE_DIR = Path(__file__).resolve().parent
 
 
 st.set_page_config(
-    page_title="AnyFlip PDF Downloader",
+    page_title="Flat-Flipbook · ระบบดาวน์โหลด AnyFlip เป็น PDF",
     page_icon=":material/picture_as_pdf:",
     layout="wide",
     menu_items={
-        "about": "AnyFlip PDF Downloader • ใช้งานเฉพาะเอกสารที่เจ้าของอนุญาตให้ดาวน์โหลดเป็น PDF",
+        "about": "Flat-Flipbook • ใช้งานเฉพาะเอกสารที่เจ้าของอนุญาตให้ดาวน์โหลดเป็น PDF",
     },
 )
 
@@ -25,6 +27,10 @@ render_header(BASE_DIR)
 
 if "download_result" not in st.session_state:
     st.session_state.download_result = None
+if "output_dir" not in st.session_state:
+    # ponytail: one temp folder per session, emptied before each new job; a session that just
+    # disappears leaves its last PDF until the server restarts.
+    st.session_state.output_dir = tempfile.mkdtemp(prefix="flat-flipbook-")
 
 
 with st.container():
@@ -53,8 +59,7 @@ with st.container():
             )
             col_threads, col_retries = st.columns(2)
             with col_threads:
-                threads = st.slider("จำนวนงานดาวน์โหลดพร้อมกัน", 1, 8, 4)
-                pdf_batch_size = st.slider("จำนวนหน้าที่แปลงต่อรอบ", 1, 50, 10)
+                threads = st.slider("จำนวนงานดาวน์โหลดพร้อมกัน", 1, 12, 4)
             with col_retries:
                 retries = st.number_input("จำนวนครั้งลองซ้ำต่อหน้า", min_value=0, max_value=10, value=1, step=1)
                 retry_delay_seconds = st.number_input(
@@ -68,7 +73,7 @@ with st.container():
             verify_tls = st.checkbox("ตรวจสอบใบรับรอง TLS", value=True)
 
         st.caption(
-            "ไฟล์ PDF จะอยู่ใน session ปัจจุบันเพื่อให้ดาวน์โหลดเท่านั้น "
+            "ไฟล์ PDF เก็บไว้ชั่วคราวสำหรับ session นี้เท่านั้น และถูกลบเมื่อเริ่มงานใหม่ "
             "ระบบไม่บันทึกประวัติหรือเก็บไฟล์ถาวร"
         )
         allowed = st.checkbox("ฉันยืนยันว่าเอกสารนี้อนุญาตให้ดาวน์โหลดเป็น PDF", value=False)
@@ -81,6 +86,8 @@ with st.container():
 
 if submitted:
     st.session_state.download_result = None
+    shutil.rmtree(st.session_state.output_dir, ignore_errors=True)
+    Path(st.session_state.output_dir).mkdir(parents=True, exist_ok=True)
 
     if not url.strip():
         st.error("กรุณาระบุลิงก์ AnyFlip ก่อนเริ่มทำงาน")
@@ -94,7 +101,6 @@ if submitted:
         threads=threads,
         retries=int(retries),
         retry_delay_seconds=float(retry_delay_seconds),
-        pdf_batch_size=pdf_batch_size,
         verify_tls=verify_tls,
     )
 
@@ -121,6 +127,7 @@ if submitted:
             title_override=title_override,
             options=options,
             progress_callback=update_progress,
+            output_dir=st.session_state.output_dir,
         )
         progress_bar.progress(100)
         status_text.markdown("สร้างไฟล์ PDF เสร็จสมบูรณ์")
@@ -137,7 +144,7 @@ if submitted:
 
 
 result: DownloadResult | None = st.session_state.download_result
-if result:
+if result and Path(result.pdf_path).is_file():
     st.markdown("### ผลลัพธ์และดาวน์โหลด")
     st.caption(f"แหล่งข้อมูล AnyFlip: {result.normalized_url}")
     st.markdown(f"**ชื่อไฟล์:** `{result.file_name}`")
@@ -152,7 +159,8 @@ if result:
     with button_col:
         st.download_button(
             label=":material/download: ดาวน์โหลด PDF",
-            data=result.pdf_bytes,
+            data=Path(result.pdf_path).read_bytes,  # read only when clicked, not on every rerun
+            on_click="ignore",
             file_name=result.file_name,
             mime="application/pdf",
             type="primary",

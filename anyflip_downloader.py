@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import concurrent.futures
 import io
+import json
 import re
 import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
-from urllib.parse import unquote, urlparse, urlunparse
+from urllib.parse import unquote, urljoin, urlparse, urlunparse
 
 
 ProgressCallback = Callable[[str, int, int, str], None]
@@ -20,6 +21,9 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 )
 INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
+# ponytail: fixed cap so one request can't fill a small Streamlit Cloud box; raise it if real books exceed it.
+MAX_PAGES = 2000
+MAX_REDIRECTS = 5
 
 
 class AnyFlipDownloadError(Exception):
@@ -31,7 +35,6 @@ class DownloadOptions:
     threads: int = 4
     retries: int = 1
     retry_delay_seconds: float = 1.0
-    pdf_batch_size: int = 10
     verify_tls: bool = True
 
     def normalized(self) -> "DownloadOptions":
@@ -39,7 +42,6 @@ class DownloadOptions:
             threads=max(1, min(int(self.threads), 12)),
             retries=max(0, min(int(self.retries), 10)),
             retry_delay_seconds=max(0.0, float(self.retry_delay_seconds)),
-            pdf_batch_size=max(1, min(int(self.pdf_batch_size), 100)),
             verify_tls=bool(self.verify_tls),
         )
 
@@ -68,13 +70,13 @@ class DownloadResult:
     normalized_url: str
     page_count: int
     downloaded_pages: int
-    pdf_bytes: bytes
+    pdf_path: str
     elapsed_seconds: float
     status_log: list[str] = field(default_factory=list)
 
     @property
     def file_size_bytes(self) -> int:
-        return len(self.pdf_bytes)
+        return Path(self.pdf_path).stat().st_size
 
 
 def emit_progress(
@@ -88,13 +90,26 @@ def emit_progress(
         callback(stage, completed, total, message)
 
 
+def is_anyflip_host(url: str) -> bool:
+    hostname = (urlparse(url).hostname or "").lower()
+    return hostname == "anyflip.com" or hostname.endswith(".anyflip.com")
+
+
 def http_get(url: str, **kwargs):
+    """GET that follows redirects only while they stay on anyflip.com."""
     try:
         import requests
     except ImportError as exc:
         raise AnyFlipDownloadError("ไม่พบแพ็กเกจ requests กรุณาติดตั้ง dependencies จาก requirements.txt") from exc
 
-    return requests.get(url, **kwargs)
+    for _ in range(MAX_REDIRECTS + 1):
+        if not is_anyflip_host(url):
+            raise AnyFlipDownloadError(f"ปฏิเสธการเชื่อมต่อนอกโดเมน anyflip.com: {urlparse(url).hostname}")
+        response = requests.get(url, allow_redirects=False, **kwargs)
+        if not response.is_redirect:
+            return response
+        url = urljoin(url, response.headers["Location"])
+    raise AnyFlipDownloadError("AnyFlip เปลี่ยนเส้นทาง (redirect) มากเกินไป")
 
 
 def normalize_anyflip_url(raw_url: str) -> str:
@@ -106,8 +121,7 @@ def normalize_anyflip_url(raw_url: str) -> str:
         candidate = f"https://{candidate}"
 
     parsed = urlparse(candidate)
-    hostname = (parsed.hostname or "").lower()
-    if hostname != "anyflip.com" and not hostname.endswith(".anyflip.com"):
+    if not is_anyflip_host(candidate):
         raise AnyFlipDownloadError("รองรับเฉพาะ URL จากโดเมน anyflip.com")
 
     path_parts = [unquote(part) for part in parsed.path.split("/") if part]
@@ -163,7 +177,12 @@ def parse_book_title(config_js: str) -> str | None:
     for pattern in patterns:
         match = re.search(pattern, config_js)
         if match:
-            title = match.group(1).strip()
+            raw = match.group(1)
+            try:
+                raw = json.loads(f'"{raw}"')  # decode \uXXXX escapes used for Thai titles
+            except ValueError:
+                pass
+            title = raw.strip()
             if title:
                 return title
     return None
@@ -177,6 +196,8 @@ def parse_page_count(config_js: str) -> int:
     page_count = int(match.group(1))
     if page_count <= 0:
         raise AnyFlipDownloadError("จำนวนหน้าใน config.js ไม่ถูกต้อง")
+    if page_count > MAX_PAGES:
+        raise AnyFlipDownloadError(f"หนังสือมี {page_count:,} หน้า เกินขีดจำกัด {MAX_PAGES:,} หน้าต่อครั้ง")
     return page_count
 
 
@@ -275,7 +296,12 @@ def download_book(
     title_override: str | None = None,
     options: DownloadOptions | None = None,
     progress_callback: ProgressCallback | None = None,
+    output_dir: str | Path | None = None,
 ) -> DownloadResult:
+    """Downloads every page and writes the PDF to `output_dir` (a new temp dir if omitted).
+
+    The PDF goes to disk rather than memory so a large book is held once, not once per copy.
+    """
     start_time = time.perf_counter()
     safe_options = (options or DownloadOptions()).normalized()
     status_log: list[str] = []
@@ -288,16 +314,11 @@ def download_book(
     metadata = prepare_book(raw_url, title_override, safe_options)
     log("prepare", 1, 1, f"พบหนังสือ \"{metadata.title}\" จำนวน {metadata.page_count:,} หน้า")
 
-    with tempfile.TemporaryDirectory(prefix="anyflip-download-") as temp_dir:
-        image_dir = Path(temp_dir) / "pages"
-        image_dir.mkdir(parents=True, exist_ok=True)
-
-        records = _download_pages(metadata, image_dir, safe_options, log)
-        pdf_bytes = _build_pdf_bytes(
-            sorted(Path(record.path) for record in records),
-            safe_options.pdf_batch_size,
-            log,
-        )
+    out_dir = Path(output_dir) if output_dir else Path(tempfile.mkdtemp(prefix="flat-flipbook-"))
+    pdf_path = out_dir / metadata.file_name
+    with tempfile.TemporaryDirectory(prefix="flat-flipbook-pages-") as temp_dir:
+        records = _download_pages(metadata, Path(temp_dir), safe_options, log)
+        _build_pdf([Path(record.path) for record in records], pdf_path, log)
 
     elapsed = time.perf_counter() - start_time
     log("done", 1, 1, "สร้างไฟล์ PDF เสร็จสมบูรณ์")
@@ -307,7 +328,7 @@ def download_book(
         normalized_url=metadata.normalized_url,
         page_count=metadata.page_count,
         downloaded_pages=len(records),
-        pdf_bytes=pdf_bytes,
+        pdf_path=str(pdf_path),
         elapsed_seconds=elapsed,
         status_log=status_log,
     )
@@ -321,44 +342,54 @@ def _download_pages(
 ) -> list[PageDownloadRecord]:
     log("download", 0, metadata.page_count, "กำลังดาวน์โหลดรูปภาพแต่ละหน้า...")
     records: list[PageDownloadRecord] = []
-    errors: list[str] = []
+    failed: dict[int, Exception] = {}
+
+    def fetch(page_index: int) -> PageDownloadRecord:
+        return _download_page(
+            page_index, metadata.page_urls[page_index], metadata.normalized_url, image_dir, options
+        )
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=options.threads) as executor:
-        future_map = {
-            executor.submit(
-                _download_page,
-                page_index,
-                page_url,
-                metadata.normalized_url,
-                image_dir,
-                options,
-            ): page_index
-            for page_index, page_url in enumerate(metadata.page_urls)
-        }
-
+        future_map = {executor.submit(fetch, index): index for index in range(metadata.page_count)}
         completed = 0
         for future in concurrent.futures.as_completed(future_map):
             page_index = future_map[future]
             try:
                 records.append(future.result())
             except Exception as exc:
-                errors.append(f"หน้า {page_index + 1}: {exc}")
+                failed[page_index] = exc
             completed += 1
-            log(
-                "download",
-                completed,
-                metadata.page_count,
-                f"ดาวน์โหลดแล้ว {completed:,}/{metadata.page_count:,} หน้า",
-            )
+            log("download", completed, metadata.page_count, f"ดาวน์โหลดแล้ว {completed:,}/{metadata.page_count:,} หน้า")
 
-    if errors:
-        preview = "; ".join(errors[:3])
-        if len(errors) > 3:
-            preview = f"{preview}; และข้อผิดพลาดอื่นอีก {len(errors) - 3} รายการ"
-        raise AnyFlipDownloadError(preview)
+    # One slower pass over the failures: parallel requests are what usually trips a rate limit.
+    if failed:
+        log("download", completed, metadata.page_count, f"ลองดาวน์โหลดซ้ำ {len(failed):,} หน้าที่ไม่สำเร็จ...")
+        for page_index in sorted(failed):
+            try:
+                records.append(fetch(page_index))
+                del failed[page_index]
+            except Exception as exc:
+                failed[page_index] = exc
+
+    if failed:
+        pages = ", ".join(str(index + 1) for index in sorted(failed)[:20])
+        more = f" และอีก {len(failed) - 20} หน้า" if len(failed) > 20 else ""
+        first_error = failed[min(failed)]
+        raise AnyFlipDownloadError(f"ดาวน์โหลดไม่สำเร็จ {len(failed):,} หน้า: {pages}{more} ({first_error})")
 
     records.sort(key=lambda record: record.page_number)
     return records
+
+
+def image_extension(data: bytes) -> str | None:
+    """File extension from the image's signature, or None when it is not an image."""
+    if data[:3] == b"\xff\xd8\xff":
+        return ".jpg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return ".png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return ".webp"
+    return None
 
 
 def _download_page(
@@ -382,9 +413,9 @@ def _download_page(
             if response.status_code != 200:
                 raise AnyFlipDownloadError(f"HTTP {response.status_code}")
 
-            extension = Path(urlparse(cleaned_url).path).suffix.lower() or ".jpg"
-            if extension not in {".jpg", ".jpeg", ".png", ".webp"}:
-                extension = ".jpg"
+            extension = image_extension(response.content)
+            if extension is None:
+                raise AnyFlipDownloadError("ไฟล์ที่ได้ไม่ใช่รูปภาพ (AnyFlip อาจส่งหน้าเว็บแจ้งข้อผิดพลาดกลับมา)")
             path = image_dir / f"{page_index:04d}{extension}"
             path.write_bytes(response.content)
             return PageDownloadRecord(page_index + 1, cleaned_url, str(path))
@@ -393,39 +424,41 @@ def _download_page(
             if attempt < options.retries and options.retry_delay_seconds > 0:
                 time.sleep(options.retry_delay_seconds)
 
-    raise AnyFlipDownloadError(f"ดาวน์โหลดไม่สำเร็จหลังลอง {options.retries + 1} ครั้ง: {last_error}")
+    raise AnyFlipDownloadError(f"หลังลอง {options.retries + 1} ครั้ง: {last_error}")
 
 
-def _build_pdf_bytes(
-    image_paths: list[Path],
-    batch_size: int,
-    log: ProgressCallback,
-) -> bytes:
+def _page_image(image_path: Path):
+    """An ImageReader for one page. JPEG pages are embedded as they are; other formats are
+    flattened onto white (so transparent pages don't turn black) and stored as JPEG."""
+    from PIL import Image
+    from reportlab.lib.utils import ImageReader
+
+    with Image.open(image_path) as image:
+        size = image.size
+        if image.format == "JPEG" and image.mode in ("RGB", "L", "CMYK"):
+            return ImageReader(str(image_path)), size
+        image = image.convert("RGBA")
+        page = Image.new("RGB", image.size, "white")
+        page.paste(image, mask=image.getchannel("A"))
+    buffer = io.BytesIO()
+    page.save(buffer, "JPEG", quality=90)
+    buffer.seek(0)
+    return ImageReader(buffer), size
+
+
+def _build_pdf(image_paths: list[Path], pdf_path: Path, log: ProgressCallback) -> None:
     if not image_paths:
         raise AnyFlipDownloadError("ไม่พบรูปภาพสำหรับสร้าง PDF")
 
-    from PIL import Image
-    from reportlab.lib.utils import ImageReader
     from reportlab.pdfgen import canvas
 
-    pdf_buffer = io.BytesIO()
-    pdf = canvas.Canvas(pdf_buffer)
+    pdf = canvas.Canvas(str(pdf_path))
     total = len(image_paths)
-
-    for start in range(0, total, batch_size):
-        batch = image_paths[start : start + batch_size]
-        for image_path in batch:
-            with Image.open(image_path) as image:
-                image.load()
-                if image.mode not in ("RGB", "L"):
-                    image = image.convert("RGB")
-                width, height = image.size
-                pdf.setPageSize((width, height))
-                pdf.drawImage(ImageReader(image), 0, 0, width=width, height=height)
-                pdf.showPage()
-
-        completed = min(start + len(batch), total)
-        log("pdf", completed, total, f"แปลงเป็น PDF แล้ว {completed:,}/{total:,} หน้า")
-
+    for completed, image_path in enumerate(image_paths, start=1):
+        reader, (width, height) = _page_image(image_path)
+        pdf.setPageSize((width, height))
+        pdf.drawImage(reader, 0, 0, width=width, height=height)
+        pdf.showPage()
+        if completed % 10 == 0 or completed == total:
+            log("pdf", completed, total, f"แปลงเป็น PDF แล้ว {completed:,}/{total:,} หน้า")
     pdf.save()
-    return pdf_buffer.getvalue()

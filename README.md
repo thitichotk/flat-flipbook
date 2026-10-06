@@ -1,136 +1,101 @@
-# AnyFlip PDF Downloader
+# Flat-Flipbook
 
-[![CI](https://github.com/FirstGameGG/anyflip-downloader/actions/workflows/build.yml/badge.svg)](https://github.com/FirstGameGG/anyflip-downloader/actions/workflows/build.yml)
+[![CI](https://github.com/thitichotk/flat-flipbook/actions/workflows/build.yml/badge.svg)](https://github.com/thitichotk/flat-flipbook/actions/workflows/build.yml)
 
-<p align="center">
-  <img src="assets/anyflip.jpg" alt="AnyFlip" width="180">
-</p>
+**Live app: [flatflipbook.streamlit.app](https://flatflipbook.streamlit.app)**
 
-A Thai-language Streamlit application that downloads permitted AnyFlip page images and combines them into a PDF.
+Flat-Flipbook (ระบบดาวน์โหลดเอกสาร AnyFlip เป็น PDF) turns an AnyFlip flipbook into a flat PDF. You paste the
+book's link. It reads the book's public viewer settings, downloads each page image, and binds the pages in order into
+one PDF. The interface is in Thai.
 
-## Disclaimer
+## Use it only with permission
 
-Use this application only for documents whose owner explicitly permits PDF downloading. You are responsible for complying with copyright law, the publisher's terms, and AnyFlip's terms of service.
+Only use Flat-Flipbook on documents whose owner explicitly allows downloading. You are responsible for copyright,
+the publisher's terms and AnyFlip's terms of service. The app doesn't check your rights for you, and it doesn't get
+around logins or access controls. It is not affiliated with AnyFlip; AnyFlip and its logo belong to their owner.
 
-This project does not determine whether you have permission, bypass authentication or access controls, or have any affiliation with AnyFlip. AnyFlip and its logo are the property of their respective owner.
+## What it does
 
-## Features
+- Accepts standard and mobile `anyflip.com` links, and keeps every request on `anyflip.com`, redirects included.
+- Names the PDF after the book (Thai titles included), or after a name you type.
+- Downloads up to 12 pages at a time with retries, then makes one slower pass over any pages that failed. If a page
+  still fails, the error lists which pages.
+- Embeds JPEG pages exactly as AnyFlip serves them, so the PDF is about the size of the images instead of ten times
+  bigger. Other formats are converted to JPEG at quality 90, and transparent pages get a white background.
+- Writes the PDF to a temporary file for your session rather than to memory, and deletes it when you start the next
+  job. Books are capped at 2,000 pages.
 
-- Accepts standard and mobile `anyflip.com` book URLs
-- Uses the AnyFlip book title or an optional custom PDF filename
-- Downloads pages concurrently with configurable retries and delay
-- Displays progress, result metrics, and an execution log
-- Preserves page order and original image dimensions
-- Generates PDFs without permanent server-side file storage
-- Provides a responsive Thai interface built with Streamlit
-
-## Local setup
+## Run it locally
 
 Python 3.12 is recommended.
 
 ```bash
-git clone https://github.com/FirstGameGG/anyflip-downloader.git
-cd anyflip-downloader
-
+git clone https://github.com/thitichotk/flat-flipbook.git
+cd flat-flipbook
 python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
+source .venv/bin/activate          # Windows: .venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
-
-python -m streamlit run app.py
+python -m streamlit run app.py     # http://localhost:8501
 ```
 
-On Windows, activate the environment with:
+Or with Docker:
 
-```powershell
-.venv\Scripts\Activate.ps1
+```bash
+docker build -t flat-flipbook .
+docker run --rm -p 8501:8501 flat-flipbook
 ```
 
-Then open [http://localhost:8501](http://localhost:8501).
+## Using it
 
-## Usage
+1. Paste the book link, for example `https://online.anyflip.com/owner/book/`.
+2. Type a file name if you want one.
+3. Confirm that the owner allows downloading, then press **เริ่มดาวน์โหลดและสร้าง PDF**.
+4. Download the PDF from the result.
 
-1. Paste a permitted AnyFlip URL, such as `https://online.anyflip.com/owner/book/`.
-2. Optionally enter a custom PDF filename.
-3. Adjust the advanced options when needed.
-4. Confirm that the document is permitted for PDF download.
-5. Select **เริ่มดาวน์โหลดและสร้าง PDF**.
-6. Review the result and download the generated PDF.
+Advanced options:
 
-## Advanced options
-
-| Option | Default | Purpose |
+| Option | Default | What it does |
 | --- | ---: | --- |
-| Concurrent downloads | 4 | Number of pages downloaded simultaneously |
-| PDF batch size | 10 pages | Number of images processed in each PDF batch |
-| Retries per page | 1 | Additional attempts after a failed page request |
-| Retry delay | 1 second | Wait time before another attempt |
-| TLS verification | Enabled | Verifies HTTPS certificates and should normally remain enabled |
-
-Lower concurrency can help on unstable networks. Smaller PDF batches reduce peak processing load but may take longer.
+| Concurrent downloads | 4 (up to 12) | Number of pages fetched at the same time. Lower it on a shaky connection. |
+| Retries per page | 1 | Extra attempts per page before the final slow pass |
+| Retry delay | 1 second | Wait between attempts |
+| TLS verification | On | Checks HTTPS certificates. Leave it on. |
 
 ## How it works
 
-1. The application normalizes the submitted URL to its AnyFlip owner and book identifiers.
-2. It reads the public viewer's `config.js` to determine the title, page count, and available page assets.
-3. Page images are downloaded concurrently into a temporary directory, with retries when configured.
-4. The images are combined in order into an image-based PDF, then the temporary files are removed.
-5. The PDF bytes remain only in the active Streamlit session until the session ends or a new job starts.
+1. The link is reduced to its owner and book IDs on `online.anyflip.com`.
+2. The viewer's `mobile/javascript/config.js` provides the title, page count and page file names.
+3. Pages download in parallel into a temporary folder. Each response must actually be a JPEG, PNG or WebP image, which
+   catches error pages that come back with status 200.
+4. The pages are bound in order into an image-only PDF, and the page images are deleted.
 
-## Project structure
+| File | Role |
+| --- | --- |
+| `app.py` | Streamlit page: form, progress, result |
+| `anyflip_downloader.py` | URL handling, config parsing, downloads with retries, PDF building. Entry point: `download_book()` |
+| `ui_components.py` | Header, footer, stylesheet |
+| `.streamlit/` | Theme and styling |
+| `tests/` | Downloader unit tests and Streamlit UI tests (no live AnyFlip calls) |
 
-```text
-.
-├── app.py                    # Streamlit UI, validation, progress, and results
-├── anyflip_downloader.py     # URL parsing, downloads, retries, and PDF generation
-├── ui_components.py          # Shared header, footer, and stylesheet loading
-├── assets/anyflip.jpg        # Header and README logo
-├── .streamlit/               # Theme and responsive application styling
-├── tests/                    # Downloader unit tests and Streamlit UI tests
-├── requirements.txt          # Python dependencies
-└── Dockerfile                # Containerized Streamlit application
-```
-
-The main Python interface is `download_book()`. It accepts `DownloadOptions`, returns `DownloadResult`, and raises `AnyFlipDownloadError` for expected failures.
-
-## Testing
+## Tests
 
 ```bash
-python -m py_compile app.py anyflip_downloader.py ui_components.py tests/test_app.py tests/test_anyflip_downloader.py
 python -m unittest discover -s tests -v
 ```
 
-The tests cover URL validation, metadata parsing, page URL generation, safe filenames, PDF creation, initial UI rendering, and form validation without live AnyFlip requests.
+## Limits
 
-## Docker
+- Only public books whose viewer settings and page images can be fetched without logging in.
+- The PDF contains images only: no selectable text, links or outline.
+- If AnyFlip changes its viewer format, the parser may need updating.
 
-```bash
-docker build -t anyflip-downloader .
-docker run --rm -p 8501:8501 anyflip-downloader
-```
+## Credits and license
 
-Open [http://localhost:8501](http://localhost:8501).
+Flat-Flipbook started as a fork of [Lofter1/anyflip-downloader](https://github.com/Lofter1/anyflip-downloader), a Go
+command-line tool. This version is a Python and Streamlit rewrite by Thitichot K. (2026), and it takes the same
+approach: read `config.js`, then fetch the page images.
 
-## Deployment
+Licensed under the [GNU General Public License v3.0](LICENSE), like the original.
 
-For Streamlit Community Cloud, select `app.py` as the entrypoint. Dependencies are declared in `requirements.txt`; no application secrets are required.
-
-The deployment environment must allow outbound HTTPS requests to public AnyFlip assets. Large books may exceed the memory or execution limits of hosted environments.
-
-## Limitations
-
-- Supports only AnyFlip URLs containing an owner and book identifier
-- Requires publicly accessible viewer metadata and page assets
-- Does not support private, authenticated, or access-controlled books
-- Produces image-based PDFs without selectable text, links, or document structure
-- Very large books may require substantial memory and processing time
-- Changes to AnyFlip's viewer format may require parser updates
-- Provides no queue, history, persistent storage, REST API, or command-line interface
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and validation guidance.
-
-## License
-
-Licensed under the [GNU General Public License v3.0](LICENSE).
+- Copyright (C) 2023 Lofter1 and contributors (original Go version)
+- Copyright (C) 2026 Thitichot K. (modified: rewritten in Python with a Streamlit interface)
