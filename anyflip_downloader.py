@@ -435,7 +435,7 @@ def _page_image(image_path: Path):
 
     with Image.open(image_path) as image:
         size = image.size
-        if image.format == "JPEG" and image.mode in ("RGB", "L", "CMYK"):
+        if image.format == "JPEG" and image.mode in ("RGB", "L"):
             return ImageReader(str(image_path)), size
         image = image.convert("RGBA")
         page = Image.new("RGB", image.size, "white")
