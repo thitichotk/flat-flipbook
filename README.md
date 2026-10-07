@@ -1,18 +1,32 @@
 # Flat-Flipbook
 
-[![CI](https://github.com/thitichotk/flat-flipbook/actions/workflows/build.yml/badge.svg)](https://github.com/thitichotk/flat-flipbook/actions/workflows/build.yml)
-
-**Live app: [flatflipbook.streamlit.app](https://flatflipbook.streamlit.app)**
+**Live: [flatflipbook.streamlit.app](https://flatflipbook.streamlit.app)** (Thai interface)
 
 Flat-Flipbook (ระบบดาวน์โหลดเอกสาร AnyFlip เป็น PDF) turns an AnyFlip flipbook into a flat PDF. You paste the
 book's link. It reads the book's public viewer settings, downloads each page image, and binds the pages in order into
-one PDF. The interface is in Thai.
+one PDF.
 
-## Use it only with permission
+> Only use Flat-Flipbook on documents whose owner explicitly allows downloading. You are responsible for copyright,
+> the publisher's terms and AnyFlip's terms of service. The app doesn't check your rights for you, and it doesn't get
+> around logins or access controls.
 
-Only use Flat-Flipbook on documents whose owner explicitly allows downloading. You are responsible for copyright,
-the publisher's terms and AnyFlip's terms of service. The app doesn't check your rights for you, and it doesn't get
-around logins or access controls. It is not affiliated with AnyFlip; AnyFlip and its logo belong to their owner.
+![The Flat-Flipbook form: the AnyFlip link, the PDF name, advanced options and the permission checkbox](assets/screenshot.png)
+
+## Using it
+
+1. Paste the book link, for example `https://online.anyflip.com/owner/book/`.
+2. Type a file name if you want one.
+3. Confirm that the owner allows downloading, then press **เริ่มดาวน์โหลดและสร้าง PDF**.
+4. Download the PDF from the result.
+
+Advanced options:
+
+| Option | Default | What it does |
+|---|---:|---|
+| Concurrent downloads | 4 (up to 12) | Number of pages fetched at the same time. Lower it on a shaky connection. |
+| Retries per page | 1 | Extra attempts per page before the final slow pass |
+| Retry delay | 1 second | Wait between attempts |
+| TLS verification | On | Checks HTTPS certificates. Leave it on. |
 
 ## What it does
 
@@ -27,7 +41,7 @@ around logins or access controls. It is not affiliated with AnyFlip; AnyFlip and
 
 ## Run it locally
 
-Python 3.12 is recommended.
+Tested on Python 3.12, the version CI and the Docker image use.
 
 ```bash
 git clone https://github.com/thitichotk/flat-flipbook.git
@@ -36,6 +50,7 @@ python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 python -m streamlit run app.py     # http://localhost:8501
+python -m unittest discover -s tests -v   # downloader and UI tests, no live AnyFlip calls
 ```
 
 Or with Docker:
@@ -45,21 +60,7 @@ docker build -t flat-flipbook .
 docker run --rm -p 8501:8501 flat-flipbook
 ```
 
-## Using it
-
-1. Paste the book link, for example `https://online.anyflip.com/owner/book/`.
-2. Type a file name if you want one.
-3. Confirm that the owner allows downloading, then press **เริ่มดาวน์โหลดและสร้าง PDF**.
-4. Download the PDF from the result.
-
-Advanced options:
-
-| Option | Default | What it does |
-| --- | ---: | --- |
-| Concurrent downloads | 4 (up to 12) | Number of pages fetched at the same time. Lower it on a shaky connection. |
-| Retries per page | 1 | Extra attempts per page before the final slow pass |
-| Retry delay | 1 second | Wait between attempts |
-| TLS verification | On | Checks HTTPS certificates. Leave it on. |
+Streamlit Community Cloud redeploys the app from `main`.
 
 ## How it works
 
@@ -69,19 +70,15 @@ Advanced options:
    catches error pages that come back with status 200.
 4. The pages are bound in order into an image-only PDF, and the page images are deleted.
 
-| File | Role |
-| --- | --- |
+| Path | Role |
+|---|---|
 | `app.py` | Streamlit page: form, progress, result |
 | `anyflip_downloader.py` | URL handling, config parsing, downloads with retries, PDF building. Entry point: `download_book()` |
 | `ui_components.py` | Header, footer, stylesheet |
 | `.streamlit/` | Theme and styling |
 | `tests/` | Downloader unit tests and Streamlit UI tests (no live AnyFlip calls) |
 
-## Tests
-
-```bash
-python -m unittest discover -s tests -v
-```
+Built with Streamlit 1.56, Requests, Pillow and ReportLab.
 
 ## Limits
 
@@ -89,7 +86,7 @@ python -m unittest discover -s tests -v
 - The PDF contains images only: no selectable text, links or outline.
 - If AnyFlip changes its viewer format, the parser may need updating.
 
-## Credits and license
+## Credits and licence
 
 Flat-Flipbook started as a fork of [Lofter1/anyflip-downloader](https://github.com/Lofter1/anyflip-downloader), a Go
 command-line tool. This version is a Python and Streamlit rewrite by Thitichot K. (2026), and it takes the same
@@ -99,3 +96,6 @@ Licensed under the [GNU General Public License v3.0](LICENSE), like the original
 
 - Copyright (C) 2023 Lofter1 and contributors (original Go version)
 - Copyright (C) 2026 Thitichot K. (modified: rewritten in Python with a Streamlit interface)
+
+Not affiliated with AnyFlip or the Bank of Thailand. AnyFlip and its logo belong to their owner, and the styling
+follows the Bank of Thailand's design system.
