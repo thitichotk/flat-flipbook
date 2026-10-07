@@ -8,9 +8,12 @@ from unittest.mock import patch
 from anyflip_downloader import (
     AnyFlipDownloadError,
     DownloadOptions,
-    _build_pdf_bytes,
+    _build_pdf,
+    _page_image,
     build_page_urls,
     clean_download_url,
+    http_get,
+    image_extension,
     normalize_anyflip_url,
     parse_book_title,
     parse_page_count,
@@ -89,30 +92,51 @@ class AnyFlipDownloaderTest(unittest.TestCase):
             "https://online.anyflip.com/a/b/files/mobile/1.jpg",
         )
 
-    def test_build_pdf_bytes_returns_pdf(self) -> None:
-        try:
-            from PIL import Image
-            import reportlab  # noqa: F401
-        except Exception as exc:
-            self.skipTest(f"PDF dependencies are not installed: {exc}")
+    def test_parse_book_title_decodes_unicode_escapes(self) -> None:
+        config = 'bookConfig.bookTitle = "\\u0e23\\u0e32\\u0e22\\u0e07\\u0e32\\u0e19";'
+        self.assertEqual(parse_book_title(config), "รายงาน")
+
+    def test_image_extension_reads_signatures(self) -> None:
+        self.assertEqual(image_extension(b"\xff\xd8\xff\xe0rest"), ".jpg")
+        self.assertEqual(image_extension(b"RIFF\x00\x00\x00\x00WEBPVP8 "), ".webp")
+        self.assertIsNone(image_extension(b"<!DOCTYPE html><html>"))
+
+    def test_http_get_refuses_redirect_off_anyflip(self) -> None:
+        class Redirect:
+            is_redirect = True
+            headers = {"Location": "http://169.254.169.254/latest/meta-data/"}
+
+        with patch("requests.get", return_value=Redirect()) as get:
+            with self.assertRaises(AnyFlipDownloadError):
+                http_get("https://online.anyflip.com/abcd/efgh/files/mobile/1.jpg")
+        self.assertEqual(get.call_count, 1)  # the off-site URL is never requested
+
+    def test_build_pdf_embeds_jpeg_as_is_and_flattens_transparency(self) -> None:
+        from PIL import Image
 
         messages: list[str] = []
 
         def log(stage: str, completed: int, total: int, message: str) -> None:
-            messages.append(f"{stage}:{completed}/{total}:{message}")
+            messages.append(message)
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            paths = []
-            for index in range(2):
-                path = Path(temp_dir) / f"{index:04d}.jpg"
-                Image.new("RGB", (20, 30), color=(255, 255, 255)).save(path)
-                paths.append(path)
+            jpeg = Path(temp_dir) / "0000.jpg"
+            Image.effect_noise((400, 600), 60).convert("RGB").save(jpeg, quality=85)
+            png = Path(temp_dir) / "0001.png"
+            Image.new("RGBA", (20, 30), (0, 0, 0, 0)).save(png)
 
-            pdf_bytes = _build_pdf_bytes(paths, batch_size=1, log=log)
+            reader, _ = _page_image(png)
+            self.assertEqual(reader.getRGBData()[:3], b"\xff\xff\xff")  # white, not black
 
-        self.assertTrue(pdf_bytes.startswith(b"%PDF"))
+            jpeg_size = jpeg.stat().st_size
+            pdf_path = Path(temp_dir) / "book.pdf"
+            _build_pdf([jpeg, png], pdf_path, log)
+            data = pdf_path.read_bytes()
+
+        self.assertTrue(data.startswith(b"%PDF"))
+        # The JPEG is embedded as-is; re-encoding the noise as raw pixels would be ~10x larger.
+        self.assertLess(len(data), 2 * jpeg_size)
         self.assertTrue(messages)
-
 
 if __name__ == "__main__":
     unittest.main()
