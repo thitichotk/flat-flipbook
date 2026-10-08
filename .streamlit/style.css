@@ -211,7 +211,7 @@ div[data-testid="stExpander"] summary:hover { color: var(--navy-900) !important;
 }
 
 /* ---- Footer ---- */
-.app-footer { color: var(--color-text-muted); font-size: .9rem; text-align: center; }
+.app-footer { color: var(--color-text-secondary); font-size: .9rem; text-align: center; }
 
 /* ---- Focus visibility (accessibility) ---- */
 *:focus-visible { outline: 2px solid var(--blue-500) !important; outline-offset: 2px !important; }
