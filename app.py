@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+import time
 from pathlib import Path
 
 import streamlit as st
@@ -11,6 +12,26 @@ from ui_components import format_bytes, load_custom_css, render_footer, render_h
 
 
 BASE_DIR = Path(__file__).resolve().parent
+TEMP_DIR_PREFIX = "flat-flipbook-"
+STALE_TEMP_DIR_SECONDS = 7200
+
+
+def cleanup_stale_temp_dirs(exclude: str | Path | None = None, max_age_seconds: int = STALE_TEMP_DIR_SECONDS) -> None:
+    """Remove abandoned session temp directories older than `max_age_seconds`."""
+    temp_root = Path(tempfile.gettempdir())
+    exclude_path = Path(exclude).resolve() if exclude else None
+    cutoff = time.time() - max_age_seconds
+
+    for entry in temp_root.glob(f"{TEMP_DIR_PREFIX}*"):
+        if not entry.is_dir():
+            continue
+        try:
+            if exclude_path and entry.resolve() == exclude_path:
+                continue
+            if entry.stat().st_mtime < cutoff:
+                shutil.rmtree(entry, ignore_errors=True)
+        except OSError:
+            continue
 
 
 st.set_page_config(
@@ -28,9 +49,8 @@ render_header(BASE_DIR)
 if "download_result" not in st.session_state:
     st.session_state.download_result = None
 if "output_dir" not in st.session_state:
-    # ponytail: one temp folder per session, emptied before each new job; a session that just
-    # disappears leaves its last PDF until the server restarts.
-    st.session_state.output_dir = tempfile.mkdtemp(prefix="flat-flipbook-")
+    st.session_state.output_dir = tempfile.mkdtemp(prefix=TEMP_DIR_PREFIX)
+    cleanup_stale_temp_dirs(exclude=st.session_state.output_dir)
 
 
 with st.container():
@@ -70,8 +90,6 @@ with st.container():
                     step=0.5,
                 )
 
-            verify_tls = st.checkbox("ตรวจสอบใบรับรอง TLS", value=True)
-
         st.caption(
             "ไฟล์ PDF เก็บไว้ชั่วคราวสำหรับ session นี้เท่านั้น และถูกลบเมื่อเริ่มงานใหม่ "
             "ระบบไม่บันทึกประวัติหรือเก็บไฟล์ถาวร"
@@ -85,10 +103,6 @@ with st.container():
 
 
 if submitted:
-    st.session_state.download_result = None
-    shutil.rmtree(st.session_state.output_dir, ignore_errors=True)
-    Path(st.session_state.output_dir).mkdir(parents=True, exist_ok=True)
-
     if not url.strip():
         st.error("กรุณาระบุลิงก์ AnyFlip ก่อนเริ่มทำงาน")
         st.stop()
@@ -97,11 +111,16 @@ if submitted:
         st.error("กรุณายืนยันสิทธิ์การดาวน์โหลดก่อนเริ่มทำงาน")
         st.stop()
 
+    st.session_state.download_result = None
+    shutil.rmtree(st.session_state.output_dir, ignore_errors=True)
+    Path(st.session_state.output_dir).mkdir(parents=True, exist_ok=True)
+    cleanup_stale_temp_dirs(exclude=st.session_state.output_dir)
+
     options = DownloadOptions(
         threads=threads,
         retries=int(retries),
         retry_delay_seconds=float(retry_delay_seconds),
-        verify_tls=verify_tls,
+        verify_tls=True,
     )
 
     progress_bar = st.progress(0)
@@ -144,7 +163,11 @@ if submitted:
 
 
 result: DownloadResult | None = st.session_state.download_result
-if result and Path(result.pdf_path).is_file():
+if result and not Path(result.pdf_path).is_file():
+    st.session_state.download_result = None
+    result = None
+
+if result:
     st.markdown("### ผลลัพธ์และดาวน์โหลด")
     st.caption(f"แหล่งข้อมูล AnyFlip: {result.normalized_url}")
     st.markdown(f"**ชื่อไฟล์:** `{result.file_name}`")
@@ -168,7 +191,6 @@ if result and Path(result.pdf_path).is_file():
         )
 
     with st.expander(":material/receipt_long: บันทึกการทำงาน", expanded=False):
-        for line in result.status_log:
-            st.write(line)
+        st.code("\n".join(result.status_log), language=None)
 
 render_footer()

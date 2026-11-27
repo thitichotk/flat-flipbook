@@ -26,7 +26,6 @@ Advanced options:
 | Concurrent downloads | 4 (up to 12) | Number of pages fetched at the same time. Lower it on a shaky connection. |
 | Retries per page | 1 | Extra attempts per page before the final slow pass |
 | Retry delay | 1 second | Wait between attempts |
-| TLS verification | On | Checks HTTPS certificates. Leave it on. |
 
 ## What it does
 
